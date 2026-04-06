@@ -1,9 +1,11 @@
 import User from "./auth.model";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
-import { error } from "node:console";
+import dotenv from "dotenv";
+dotenv.config();
 
 const JWT_SECRET = process.env.JWT_SECRET as string;
+// console.log(process.env.JWT_SECRET);
 
 export const registerUser = async (data: any) => {
     const { name, email, password } = data;
@@ -26,7 +28,7 @@ export const registerUser = async (data: any) => {
 export const loginUser = async (data: any) => {
     const { email, password } = data;
 
-    const user = await User.findOne(email);
+    const user = await User.findOne({ email });
     if (!user) {
         throw new Error("Invalid credentials");
     }
