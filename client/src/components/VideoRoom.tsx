@@ -8,80 +8,108 @@ const VideoRoom = () => {
 
   let peer: RTCPeerConnection;
 
-  useEffect(() => {
-    peer = createPeerConnection();
+useEffect(() => {
+  const peer = createPeerConnection(); // ✅ FIX: use const inside hook
 
-    // Get camera & mic
-    navigator.mediaDevices
-      .getUserMedia({ video: true, audio: true })
-      .then((stream) => {
-        if (localVideo.current) {
-          localVideo.current.srcObject = stream;
-        }
+  let localStream: MediaStream;
 
-        stream.getTracks().forEach((track) => {
-          peer.addTrack(track, stream);
-        });
+  // Get camera & mic
+  navigator.mediaDevices
+    .getUserMedia({ video: true, audio: true })
+    .then((stream) => {
+      localStream = stream;
+
+      if (localVideo.current) {
+        localVideo.current.srcObject = stream;
+      }
+
+      stream.getTracks().forEach((track) => {
+        peer.addTrack(track, stream);
       });
+    });
 
-    // Receive remote stream
-    peer.ontrack = (event) => {
-      if (remoteVideo.current) {
-        remoteVideo.current.srcObject = event.streams[0];
-      }
-    };
+  // Receive remote stream
+  peer.ontrack = (event) => {
+    if (remoteVideo.current) {
+      remoteVideo.current.srcObject = event.streams[0];
+    }
+  };
 
-    // ICE candidates
-    peer.onicecandidate = (event) => {
-      if (event.candidate) {
-        socket.emit("ice-candidate", {
-          candidate: event.candidate,
-          roomId: "room1",
-        });
-      }
-    };
-
-    // Join room
-    socket.emit("join-room", "room1");
-
-    // When another user joins
-    socket.on("user-joined", async () => {
-      const offer = await peer.createOffer();
-      await peer.setLocalDescription(offer);
-
-      socket.emit("offer", {
-        offer,
+  // ICE candidates
+  peer.onicecandidate = (event) => {
+    if (event.candidate) {
+      socket.emit("ice-candidate", {
+        candidate: event.candidate,
         roomId: "room1",
       });
+    }
+  };
+
+  // Join room
+  socket.emit("join-room", {
+    roomId: "room1",
+    userId: "user123",
+  });
+
+  // When another user joins
+  socket.on("user-joined", async ({ socketId }) => {
+    console.log("User joined:", socketId);
+
+    const offer = await peer.createOffer();
+    await peer.setLocalDescription(offer);
+
+    socket.emit("offer", {
+      offer,
+      roomId: "room1",
     });
+  });
 
-    // Receive offer
-    socket.on("offer", async (offer) => {
-      await peer.setRemoteDescription(offer);
+  // Receive offer
+  socket.on("offer", async (offer) => {
+    await peer.setRemoteDescription(offer);
 
-      const answer = await peer.createAnswer();
-      await peer.setLocalDescription(answer);
+    const answer = await peer.createAnswer();
+    await peer.setLocalDescription(answer);
 
-      socket.emit("answer", {
-        answer,
-        roomId: "room1",
-      });
+    socket.emit("answer", {
+      answer,
+      roomId: "room1",
     });
+  });
 
-    // Receive answer
-    socket.on("answer", async (answer) => {
-      await peer.setRemoteDescription(answer);
-    });
+  // Receive answer
+  socket.on("answer", async (answer) => {
+    await peer.setRemoteDescription(answer);
+  });
 
-    // Receive ICE
-    socket.on("ice-candidate", async (candidate) => {
+  // Receive ICE
+  socket.on("ice-candidate", async (candidate) => {
+    try {
       await peer.addIceCandidate(candidate);
-    });
+    } catch (err) {
+      console.error("ICE error:", err);
+    }
+  });
 
-    return () => {
-      socket.disconnect();
-    };
-  }, []);
+  // Handle user leave
+  socket.on("user-left", () => {
+    console.log("User left");
+
+    if (remoteVideo.current) {
+      remoteVideo.current.srcObject = null;
+    }
+  });
+
+  //  CLEANUP 
+  return () => {
+    peer.close();
+    socket.off("user-joined");
+    socket.off("offer");
+    socket.off("answer");
+    socket.off("ice-candidate");
+    socket.off("user-left");
+  };
+}, []);
 
   return (
     <div>
