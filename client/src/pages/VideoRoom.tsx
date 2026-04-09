@@ -1,134 +1,112 @@
 import { useEffect, useRef } from "react";
+import { useParams } from "react-router-dom";
 import { socket } from "../services/socket";
-import { createPeerConnection } from "../lib/webrtc";
 
-const VideoRoom = () => {
-  const localVideo = useRef<HTMLVideoElement>(null);
-  const remoteVideo = useRef<HTMLVideoElement>(null);
+export default function VideoRoom() {
+  const { roomId } = useParams();
 
-  let peer: RTCPeerConnection;
+  const localVideoRef = useRef<HTMLVideoElement>(null);
+  const remoteVideoRef = useRef<HTMLVideoElement>(null);
 
-useEffect(() => {
-  const peer = createPeerConnection(); // ✅ FIX: use const inside hook
+  const peerConnection = useRef<RTCPeerConnection | null>(null);
 
-  let localStream: MediaStream;
+  useEffect(() => {
+    const init = async () => {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: true,
+      });
 
-  // Get camera & mic
-  navigator.mediaDevices
-    .getUserMedia({ video: true, audio: true })
-    .then((stream) => {
-      localStream = stream;
-
-      if (localVideo.current) {
-        localVideo.current.srcObject = stream;
+      // Show local video
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
       }
 
+      // Create peer connection
+      peerConnection.current = new RTCPeerConnection({
+        iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+      });
+
+      // Add tracks
       stream.getTracks().forEach((track) => {
-        peer.addTrack(track, stream);
+        peerConnection.current?.addTrack(track, stream);
       });
+
+      // Receive remote stream
+      peerConnection.current.ontrack = (event) => {
+        if (remoteVideoRef.current) {
+          remoteVideoRef.current.srcObject = event.streams[0];
+        }
+      };
+
+      // ICE candidates
+      peerConnection.current.onicecandidate = (event) => {
+        if (event.candidate) {
+          socket.emit("ice-candidate", {
+            roomId,
+            candidate: event.candidate,
+          });
+        }
+      };
+
+      // Join room
+      socket.emit("join-room", roomId);
+    };
+
+    init();
+
+    // When another user joins > create offer
+    socket.on("user-joined", async () => {
+      const offer = await peerConnection.current?.createOffer();
+      await peerConnection.current?.setLocalDescription(offer);
+
+      socket.emit("offer", { roomId, offer });
     });
 
-  // Receive remote stream
-  peer.ontrack = (event) => {
-    if (remoteVideo.current) {
-      remoteVideo.current.srcObject = event.streams[0];
-    }
-  };
+    // Receive offer > send answer
+    socket.on("offer", async ({ offer }) => {
+      await peerConnection.current?.setRemoteDescription(offer);
 
-  // ICE candidates
-  peer.onicecandidate = (event) => {
-    if (event.candidate) {
-      socket.emit("ice-candidate", {
-        candidate: event.candidate,
-        roomId: "room1",
-      });
-    }
-  };
+      const answer = await peerConnection.current?.createAnswer();
+      await peerConnection.current?.setLocalDescription(answer);
 
-  // Join room
-  socket.emit("join-room", {
-    roomId: "room1",
-    userId: "user123",
-  });
-
-  // When another user joins
-  socket.on("user-joined", async ({ socketId }) => {
-    console.log("User joined:", socketId);
-
-    const offer = await peer.createOffer();
-    await peer.setLocalDescription(offer);
-
-    socket.emit("offer", {
-      offer,
-      roomId: "room1",
+      socket.emit("answer", { roomId, answer });
     });
-  });
 
-  // Receive offer
-  socket.on("offer", async (offer) => {
-    await peer.setRemoteDescription(offer);
-
-    const answer = await peer.createAnswer();
-    await peer.setLocalDescription(answer);
-
-    socket.emit("answer", {
-      answer,
-      roomId: "room1",
+    // Receive answer
+    socket.on("answer", async ({ answer }) => {
+      await peerConnection.current?.setRemoteDescription(answer);
     });
-  });
 
-  // Receive answer
-  socket.on("answer", async (answer) => {
-    await peer.setRemoteDescription(answer);
-  });
+    // Receive ICE
+    socket.on("ice-candidate", async ({ candidate }) => {
+      try {
+        await peerConnection.current?.addIceCandidate(candidate);
+      } catch (err) {
+        console.error(err);
+      }
+    });
 
-  // Receive ICE
-  socket.on("ice-candidate", async (candidate) => {
-    try {
-      await peer.addIceCandidate(candidate);
-    } catch (err) {
-      console.error("ICE error:", err);
-    }
-  });
-
-  // Handle user leave
-  socket.on("user-left", () => {
-    console.log("User left");
-
-    if (remoteVideo.current) {
-      remoteVideo.current.srcObject = null;
-    }
-  });
-
-  //  CLEANUP 
-  return () => {
-    peer.close();
-    socket.off("user-joined");
-    socket.off("offer");
-    socket.off("answer");
-    socket.off("ice-candidate");
-    socket.off("user-left");
-  };
-}, []);
+    return () => {
+      socket.disconnect();
+      peerConnection.current?.close();
+    };
+  }, [roomId]);
 
   return (
-    <div>
-      <h2>Video Room</h2>
-
+    <div className="h-screen bg-black flex flex-col items-center justify-center gap-4">
       <video
-        ref={localVideo}
+        ref={localVideoRef}
         autoPlay
         muted
-        style={{ width: "300px" }}
+        className="w-[300px] rounded-lg border"
       />
 
       <video
-        ref={remoteVideo}
+        ref={remoteVideoRef}
         autoPlay
-        style={{ width: "300px" }}
+        className="w-[500px] rounded-lg border"
       />
     </div>
   );
-};
-
-export default VideoRoom;
+}
