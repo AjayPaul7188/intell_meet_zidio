@@ -1,7 +1,12 @@
-import VideoRoom from "./components/VideoRoom";
+import ProtectedRoute from "./components/ProtectedRoute";
+import VideoRoom from "./pages/VideoRoom";
 
 function App() {
-  return <VideoRoom />;
+  return (
+    <ProtectedRoute>
+      <VideoRoom />
+    </ProtectedRoute>
+  );
 }
 
 export default App;
