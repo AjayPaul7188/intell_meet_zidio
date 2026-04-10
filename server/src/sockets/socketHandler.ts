@@ -11,80 +11,73 @@ export const handleSocket = (io: Server) => {
   io.on("connection", (socket: Socket) => {
     console.log("User connected:", socket.id);
 
-    // Join room + notification
-    socket.on("join-room", ({ roomId, userId }: { roomId: string; userId: string }) => {
+    // JOIN ROOM
+    socket.on("join-room", ({ roomId, userId }) => {
       if (!roomId || !userId) return;
 
       socket.join(roomId);
       users[socket.id] = { userId, roomId };
 
-      // Notify others
-      socket.to(roomId).emit("user-joined", {
-        socketId: socket.id,
-        userId,
-        message: `${userId} joined the meeting`,
+      const existingUsers = Object.keys(users).filter(
+        (id) => id !== socket.id && users[id].roomId === roomId
+      );
+
+      socket.emit("existing-users", existingUsers);
+
+      socket.to(roomId).emit("user-joined", socket.id);
+    });
+
+    // OFFER
+    socket.on("offer", ({ to, offer }) => {
+      io.to(to).emit("offer", {
+        from: socket.id,
+        offer,
       });
-
-      // Send confirmation to current user
-      socket.emit("joined-success", { roomId });
     });
 
-    // WebRTC signaling
-    socket.on("offer", ({ offer, roomId }: { offer: any; roomId: string }) => {
-      socket.to(roomId).emit("offer", offer);
+    // ANSWER
+    socket.on("answer", ({ to, answer }) => {
+      io.to(to).emit("answer", {
+        from: socket.id,
+        answer,
+      });
     });
 
-    socket.on("answer", ({ answer, roomId }: { answer: any; roomId: string }) => {
-      socket.to(roomId).emit("answer", answer);
+    // ICE
+    socket.on("ice-candidate", ({ to, candidate }) => {
+      io.to(to).emit("ice-candidate", {
+        from: socket.id,
+        candidate,
+      });
     });
 
-    socket.on("ice-candidate", ({ candidate, roomId }: { candidate: any; roomId: string }) => {
-      socket.to(roomId).emit("ice-candidate", candidate);
+    // CHAT
+    socket.on("send-message", ({ roomId, message, userId }) => {
+      if (!roomId || !message) return;
+
+      socket.to(roomId).emit("receive-message", {
+        message,
+        userId,
+        time: new Date(),
+      });
     });
 
-    // Chat functionality 
-    socket.on(
-      "send-message",
-      ({ roomId, message, userId }: { roomId: string; message: string; userId: string }) => {
-        if (!roomId || !message) return;
-
-        const chatData = {
-          message,
-          userId,
-          time: new Date(),
-        };
-
-        // Send message to everyone in room
-        io.to(roomId).emit("receive-message", chatData);
-
-        // Notification for new message 
-        socket.to(roomId).emit("new-message-notification", {
-          userId,
-          info: "New message received",
-        });
-      }
-    );
-
-    // Typing indicator 
-    socket.on("typing", ({ roomId, userId }: { roomId: string; userId: string }) => {
+    // TYPING
+    socket.on("typing", ({ roomId, userId }) => {
       socket.to(roomId).emit("user-typing", { userId });
     });
 
-    socket.on("stop-typing", ({ roomId, userId }: { roomId: string; userId: string }) => {
-      socket.to(roomId).emit("user-stop-typing", { userId });
+    // LEAVE
+    socket.on("leave-room", (roomId) => {
+      socket.leave(roomId);
     });
 
-    // Disconnect handling + notification
+    // DISCONNECT
     socket.on("disconnecting", () => {
       const user = users[socket.id];
 
       if (user) {
-        socket.to(user.roomId).emit("user-left", {
-          socketId: socket.id,
-          userId: user.userId,
-          message: `${user.userId} left the meeting`,
-        });
-
+        socket.to(user.roomId).emit("user-left", socket.id);
         delete users[socket.id];
       }
     });

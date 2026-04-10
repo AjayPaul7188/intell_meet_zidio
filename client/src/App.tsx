@@ -3,16 +3,32 @@ import ProtectedRoute from "./components/ProtectedRoute";
 
 import Lobby from "./pages/Lobby";
 import VideoRoom from "./pages/VideoRoom";
+import Auth from "./pages/Auth";
 
 function App() {
   return (
     <BrowserRouter>
-      <ProtectedRoute>
-        <Routes>
-          <Route path="/" element={<Lobby />} />
-          <Route path="/room/:roomId" element={<VideoRoom />} />
-        </Routes>
-      </ProtectedRoute>
+      <Routes>
+        <Route path="/auth" element={<Auth />} />
+
+        <Route
+          path="/"
+          element={
+            <ProtectedRoute>
+              <Lobby />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/room/:roomId"
+          element={
+            <ProtectedRoute>
+              <VideoRoom />
+            </ProtectedRoute>
+          }
+        />
+      </Routes>
     </BrowserRouter>
   );
 }

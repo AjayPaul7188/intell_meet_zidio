@@ -7,10 +7,13 @@ import { Button } from "../components/ui/button";
 import { loginUser, signupUser } from "../features/auth/api";
 import { useAuthStore } from "../store/authStore";
 import { connectSocket } from "../services/socket";
+import { useNavigate } from "react-router-dom";
 
 export default function Auth() {
   const [isLogin, setIsLogin] = useState(true);
   const [error, setError] = useState("");
+
+  const navigate = useNavigate();
 
   const [form, setForm] = useState({
     name: "",
@@ -24,14 +27,16 @@ export default function Auth() {
   const loginMutation = useMutation({
     mutationFn: loginUser,
     onSuccess: (res) => {
-      const token = res.data.token;
+      const token = res.data.accessToken;
+
+      localStorage.setItem("token", token);
 
       setToken(token);
       connectSocket(token);
 
       setError("");
-      alert("Login successful");
-      window.location.reload();
+
+      navigate("/");
     },
     onError: (err: any) => {
       setError(err.response?.data?.message || "Login failed");
@@ -103,7 +108,7 @@ export default function Auth() {
         {!isLogin && (
           <Input
             placeholder="Full Name"
-            className="mb-3"
+            className="mb-3 text-white"
             value={form.name}
             onChange={(e) =>
               setForm({ ...form, name: e.target.value })
@@ -114,7 +119,7 @@ export default function Auth() {
         <Input
           type="email"
           placeholder="Email"
-          className="mb-3"
+          className="mb-3 text-white"
           value={form.email}
           onChange={(e) =>
             setForm({ ...form, email: e.target.value })
@@ -124,7 +129,7 @@ export default function Auth() {
         <Input
           type="password"
           placeholder="Password"
-          className="mb-4"
+          className="mb-4 text-white"
           value={form.password}
           onChange={(e) =>
             setForm({ ...form, password: e.target.value })
