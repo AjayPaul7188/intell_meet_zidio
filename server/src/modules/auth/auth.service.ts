@@ -38,6 +38,8 @@ export const loginUser = async (data: any) => {
         throw new Error("Invalid credentials");
     }
 
+    const freshUser = await User.findById(user._id);
+
     const accessToken = jwt.sign(
         { userId: user._id },
         JWT_SECRET,
@@ -50,5 +52,5 @@ export const loginUser = async (data: any) => {
         { expiresIn: "7d" }
     );
 
-    return { user, accessToken, refreshToken };
+    return { user: freshUser, accessToken, refreshToken };
 }

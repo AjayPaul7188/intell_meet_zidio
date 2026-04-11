@@ -6,17 +6,24 @@ export default function VideoRoom() {
   const { roomId } = useParams();
   const navigate = useNavigate();
 
-  const localVideoRef = useRef<HTMLVideoElement>(null);
-  const localStream = useRef<MediaStream | null>(null);
-  const peers = useRef<{ [key: string]: RTCPeerConnection }>({});
+  const user = JSON.parse(sessionStorage.getItem("authUser") || "{}");
 
-  const [remoteStreams, setRemoteStreams] = useState<MediaStream[]>([]);
+  const [userMap, setUserMap] = useState<any>({});
+  const [remoteStreams, setRemoteStreams] = useState<
+    { stream: MediaStream; userId: string }[]
+  >([]);
+
   const [messages, setMessages] = useState<any[]>([]);
   const [message, setMessage] = useState("");
   const [typing, setTyping] = useState("");
 
   const [isMuted, setIsMuted] = useState(false);
   const [isCameraOff, setIsCameraOff] = useState(false);
+
+  const localVideoRef = useRef<HTMLVideoElement>(null);
+  const localStream = useRef<MediaStream | null>(null);
+  const peers = useRef<any>({});
+  const pendingCandidates = useRef<any>({});
 
   useEffect(() => {
     const init = async () => {
@@ -31,88 +38,159 @@ export default function VideoRoom() {
         localVideoRef.current.srcObject = stream;
       }
 
+      socket.connect();
+
       socket.emit("join-room", {
         roomId,
-        userId: socket.id,
+        name: user.name,
+        avatar: user.avatar || null,
       });
     };
 
     init();
 
-    // EXISTING USERS → YOU INITIATE
-    socket.on("existing-users", async (users) => {
-      for (let userId of users) {
-        createPeer(userId, true);
-      }
-    });
+    // ================= EXISTING USERS =================
+    const handleExistingUsers = (users: any[]) => {
+      const map: any = {};
 
-    // NEW USER JOINED → DO NOTHING (IMPORTANT)
-    socket.on("user-joined", (userId) => {
-      console.log("User joined:", userId);
-    });
+      users.forEach((u: any) => {
+        map[u.id] = u;
+        createPeer(u.id, true);
+      });
 
-    // OFFER
+      setUserMap(map);
+    };
+
+    socket.on("existing-users", handleExistingUsers);
+
+    // ================= NEW USER =================
+    const handleUserJoined = (u: any) => {
+      setUserMap((prev: any) => ({
+        ...prev,
+        [u.id]: u,
+      }));
+
+      createPeer(u.id, false);
+    };
+
+    socket.on("user-joined", handleUserJoined);
+
+    // ================= OFFER =================
     socket.on("offer", async ({ from, offer }) => {
-      console.log("Offer received from", from);
-      createPeer(from, false, offer);
-    });
+      let pc = peers.current[from];
 
-    // ANSWER
-    socket.on("answer", async ({ from, answer }) => {
-      console.log("Answer received from", from);
-      await peers.current[from]?.setRemoteDescription(answer);
-    });
+      if (!pc) {
+        pc = createPeer(from, false);
+      }
 
-    // ICE
-    socket.on("ice-candidate", async ({ from, candidate }) => {
+      if (pc.signalingState !== "stable") return;
+
       try {
-        await peers.current[from]?.addIceCandidate(candidate);
-      } catch (err) {
-        console.error("ICE error:", err);
+        await pc.setRemoteDescription(new RTCSessionDescription(offer));
+      } catch (err: any) {
+        console.log("Ignored offer error:", err.message);
+        return;
+      }
+
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+
+      socket.emit("answer", { to: from, answer });
+
+      flushCandidates(from);
+    });
+
+    // ================= ANSWER =================
+    socket.on("answer", async ({ from, answer }) => {
+      const pc = peers.current[from];
+      if (!pc) return;
+
+      if (pc.signalingState !== "have-local-offer") return;
+
+      try {
+        await pc.setRemoteDescription(new RTCSessionDescription(answer));
+      } catch (err: any) {
+        console.log("Ignored setRemoteDescription error:", err.message);
+      }
+
+      flushCandidates(from);
+    });
+
+    // ================= ICE =================
+    socket.on("ice-candidate", async ({ from, candidate }) => {
+      const pc = peers.current[from];
+      if (!pc) return;
+
+      if (pc.remoteDescription) {
+        try {
+          await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        } catch {
+          console.log("ICE ignored");
+        }
+      } else {
+        if (!pendingCandidates.current[from]) {
+          pendingCandidates.current[from] = [];
+        }
+        pendingCandidates.current[from].push(candidate);
       }
     });
 
-    // CHAT
-    socket.on("receive-message", (data) => {
-      setMessages((prev) => [...prev, { self: false, message: data.message }]);
-    });
+    // ================= CHAT =================
+    const handleReceiveMessage = (data: any) => {
+      setMessages((prev) => [
+        ...prev,
+        {
+          self: false,
+          message: data.message,
+          name: data.name,
+          avatar: data.avatar,
+        },
+      ]);
+    };
 
-    // TYPING
-    socket.on("user-typing", () => {
+    socket.on("receive-message", handleReceiveMessage);
+
+    // ================= TYPING =================
+    const handleTyping = () => {
       setTyping("Someone is typing...");
       setTimeout(() => setTyping(""), 2000);
-    });
+    };
 
-    // USER LEFT
+    socket.on("user-typing", handleTyping);
+
+    // ================= USER LEFT =================
     socket.on("user-left", (id) => {
       peers.current[id]?.close();
       delete peers.current[id];
 
       setRemoteStreams((prev) =>
-        prev.filter((stream) => stream.id !== id)
+        prev.filter((s) => s.userId !== id)
       );
     });
 
     return () => {
-      Object.values(peers.current).forEach((pc) => pc.close());
+      socket.off("existing-users", handleExistingUsers);
+      socket.off("user-joined", handleUserJoined);
+      socket.off("receive-message", handleReceiveMessage);
+      socket.off("user-typing", handleTyping);
 
-      socket.off("existing-users");
-      socket.off("user-joined");
-      socket.off("offer");
-      socket.off("answer");
-      socket.off("ice-candidate");
-      socket.off("receive-message");
-      socket.off("user-typing");
-      socket.off("user-left");
+      if (localStream.current) {
+        localStream.current.getTracks().forEach((track) => track.stop());
+      }
+
+      // close peers
+      Object.values(peers.current).forEach((pc: any) => pc.close());
+
+      peers.current = {};
+
+
+      socket.disconnect();
     };
   }, [roomId]);
 
-  const createPeer = async (
-    userId: string,
-    initiator: boolean,
-    offer?: any
-  ) => {
-    if (peers.current[userId]) return; 
+  // ================= CREATE PEER =================
+  const createPeer = (userId: string, initiator: boolean) => {
+    if (peers.current[userId]) return peers.current[userId];
 
     const pc = new RTCPeerConnection({
       iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
@@ -120,22 +198,19 @@ export default function VideoRoom() {
 
     peers.current[userId] = pc;
 
-    // ADD LOCAL TRACKS
     localStream.current?.getTracks().forEach((track) => {
       pc.addTrack(track, localStream.current!);
     });
 
-    // RECEIVE REMOTE STREAM
     pc.ontrack = (event) => {
-      const stream = event.streams[0];
-
       setRemoteStreams((prev) => {
-        if (prev.find((s) => s.id === stream.id)) return prev;
-        return [...prev, stream];
+        const exists = prev.find((s) => s.userId === userId);
+        if (exists) return prev;
+
+        return [...prev, { stream: event.streams[0], userId }];
       });
     };
 
-    // ICE
     pc.onicecandidate = (event) => {
       if (event.candidate) {
         socket.emit("ice-candidate", {
@@ -145,23 +220,35 @@ export default function VideoRoom() {
       }
     };
 
-    // INITIATOR
     if (initiator) {
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
+      pc.createOffer().then(async (offer) => {
+        if (pc.signalingState !== "stable") return;
 
-      socket.emit("offer", { to: userId, offer });
-    } else if (offer) {
-      await pc.setRemoteDescription(offer);
-
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-
-      socket.emit("answer", { to: userId, answer });
+        await pc.setLocalDescription(offer);
+        socket.emit("offer", { to: userId, offer });
+      });
     }
+
+    return pc;
   };
 
-  // MUTE
+  // ================= FLUSH ICE =================
+  const flushCandidates = async (userId: string) => {
+    const pc = peers.current[userId];
+    const candidates = pendingCandidates.current[userId];
+
+    if (!pc || !candidates) return;
+
+    for (const c of candidates) {
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(c));
+      } catch {}
+    }
+
+    pendingCandidates.current[userId] = [];
+  };
+
+  // ================= CONTROLS =================
   const toggleMute = () => {
     const track = localStream.current?.getAudioTracks()[0];
     if (track) {
@@ -170,7 +257,6 @@ export default function VideoRoom() {
     }
   };
 
-  // CAMERA
   const toggleCamera = () => {
     const track = localStream.current?.getVideoTracks()[0];
     if (track) {
@@ -179,77 +265,111 @@ export default function VideoRoom() {
     }
   };
 
-  // SEND MESSAGE
+  // ================= CHAT =================
   const sendMessage = () => {
     if (!message.trim()) return;
 
-    socket.emit("send-message", {
-      roomId,
-      message,
-      userId: socket.id,
-    });
+    socket.emit("send-message", { roomId, message });
 
-    setMessages((prev) => [...prev, { self: true, message }]);
+    setMessages((prev) => [
+      ...prev,
+      {
+        self: true,
+        message,
+        name: user.name,
+        avatar: user.avatar,
+      },
+    ]);
+
     setMessage("");
   };
 
-  const handleTyping = () => {
-    socket.emit("typing", {
-      roomId,
-      userId: socket.id,
-    });
-  };
-
-  // LEAVE
   const leaveMeeting = () => {
+    // Stop camera + mic
+    if (localStream.current) {
+      localStream.current.getTracks().forEach((track) => {
+        track.stop();
+      });
+    }
+
+    // Close all peer connections
+    (Object.values(peers.current) as RTCPeerConnection[]).forEach((pc) => {
+      pc.close();
+    });
+
+    peers.current = {};
+
+    // Clear remote streams
+    setRemoteStreams([]);
+
+    // Notify server
     socket.emit("leave-room", roomId);
+
+    // Disconnect socket
     socket.disconnect();
+
+    // Navigate away
     navigate("/");
   };
 
   return (
     <div className="h-screen bg-black text-white flex flex-col">
+      {/* VIDEO */}
       <div className="flex-1 grid grid-cols-2 md:grid-cols-3 gap-4 p-4">
-        <video ref={localVideoRef} autoPlay muted className="rounded w-full" />
+        <div className="relative">
+          <video ref={localVideoRef} autoPlay muted className="rounded w-full" />
+          <p className="absolute bottom-1 left-1 bg-black px-2 text-sm">
+            You ({user.name})
+          </p>
+        </div>
 
-        {remoteStreams.map((stream, i) => (
-          <video
-            key={i}
-            autoPlay
-            ref={(video) => {
-              if (video) video.srcObject = stream;
-            }}
-            className="rounded w-full"
-          />
+        {remoteStreams.map((item, i) => (
+          <div key={i} className="relative">
+            <video
+              autoPlay
+              ref={(video) => {
+                if (video) video.srcObject = item.stream;
+              }}
+              className="rounded w-full"
+            />
+            <p className="absolute bottom-1 left-1 bg-black px-2 text-sm">
+              {userMap[item.userId]?.name || "User"}
+            </p>
+          </div>
         ))}
       </div>
 
+      {/* CONTROLS */}
       <div className="flex justify-center gap-4 p-4 bg-slate-900">
-        <button onClick={toggleMute} className="bg-slate-700 px-4 py-2 rounded">
-          {isMuted ? "Unmute" : "Mute"}
-        </button>
-
-        <button
-          onClick={toggleCamera}
-          className="bg-slate-700 px-4 py-2 rounded"
-        >
+        <button onClick={toggleMute}>{isMuted ? "Unmute" : "Mute"}</button>
+        <button onClick={toggleCamera}>
           {isCameraOff ? "Camera On" : "Camera Off"}
         </button>
-
-        <button
-          onClick={leaveMeeting}
-          className="bg-red-500 px-4 py-2 rounded"
-        >
+        <button onClick={leaveMeeting} className="bg-red-500 px-3">
           Leave
         </button>
       </div>
 
+      {/* CHAT */}
       <div className="bg-slate-800 p-3">
-        <div className="h-32 overflow-y-auto mb-2">
+        <div className="h-32 overflow-y-auto mb-2 space-y-2">
           {messages.map((msg, i) => (
-            <p key={i} className={msg.self ? "text-right" : ""}>
-              {msg.message}
-            </p>
+            <div key={i} className={`flex gap-2 ${msg.self ? "justify-end" : ""}`}>
+              {!msg.self && msg.avatar && (
+                <img src={msg.avatar} className="w-6 h-6 rounded-full" />
+              )}
+
+              <div>
+                <p className="text-xs text-gray-400">{msg.name}</p>
+                <p className="bg-slate-700 px-3 py-1 rounded-lg">
+                  {msg.message}
+                </p>
+              </div>
+
+              {msg.self && msg.avatar && (
+                <img src={msg.avatar} className="w-6 h-6 rounded-full" />
+              )}
+            </div>
           ))}
           <p className="text-gray-400 text-sm">{typing}</p>
         </div>
@@ -260,7 +380,7 @@ export default function VideoRoom() {
             value={message}
             onChange={(e) => {
               setMessage(e.target.value);
-              handleTyping();
+              socket.emit("typing", { roomId });
             }}
           />
           <button onClick={sendMessage} className="bg-blue-600 px-4 rounded">

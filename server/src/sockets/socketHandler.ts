@@ -1,8 +1,10 @@
 import { Server, Socket } from "socket.io";
 
 interface User {
-  userId: string;
+  id: string;
   roomId: string;
+  name: string;
+  avatar: string;
 }
 
 export const handleSocket = (io: Server) => {
@@ -11,39 +13,35 @@ export const handleSocket = (io: Server) => {
   io.on("connection", (socket: Socket) => {
     console.log("User connected:", socket.id);
 
-    // JOIN ROOM
-    socket.on("join-room", ({ roomId, userId }) => {
-      if (!roomId || !userId) return;
+    socket.on("join-room", ({ roomId, name, avatar }) => {
+      if (users[socket.id]) return;
 
       socket.join(roomId);
-      users[socket.id] = { userId, roomId };
 
-      const existingUsers = Object.keys(users).filter(
-        (id) => id !== socket.id && users[id].roomId === roomId
+      users[socket.id] = {
+        id: socket.id,
+        roomId,
+        name,
+        avatar,
+      };
+
+      const existingUsers = Object.values(users).filter(
+        (u) => u.roomId === roomId && u.id !== socket.id
       );
 
       socket.emit("existing-users", existingUsers);
 
-      socket.to(roomId).emit("user-joined", socket.id);
+      socket.to(roomId).emit("user-joined", users[socket.id]);
     });
 
-    // OFFER
     socket.on("offer", ({ to, offer }) => {
-      io.to(to).emit("offer", {
-        from: socket.id,
-        offer,
-      });
+      io.to(to).emit("offer", { from: socket.id, offer });
     });
 
-    // ANSWER
     socket.on("answer", ({ to, answer }) => {
-      io.to(to).emit("answer", {
-        from: socket.id,
-        answer,
-      });
+      io.to(to).emit("answer", { from: socket.id, answer });
     });
 
-    // ICE
     socket.on("ice-candidate", ({ to, candidate }) => {
       io.to(to).emit("ice-candidate", {
         from: socket.id,
@@ -51,39 +49,27 @@ export const handleSocket = (io: Server) => {
       });
     });
 
-    // CHAT
-    socket.on("send-message", ({ roomId, message, userId }) => {
-      if (!roomId || !message) return;
+    socket.on("send-message", ({ roomId, message }) => {
+      const user = users[socket.id];
+      if (!user) return;
 
       socket.to(roomId).emit("receive-message", {
         message,
-        userId,
-        time: new Date(),
+        name: user.name,
+        avatar: user.avatar,
       });
     });
 
-    // TYPING
-    socket.on("typing", ({ roomId, userId }) => {
-      socket.to(roomId).emit("user-typing", { userId });
-    });
-
-    // LEAVE
-    socket.on("leave-room", (roomId) => {
-      socket.leave(roomId);
-    });
-
-    // DISCONNECT
-    socket.on("disconnecting", () => {
-      const user = users[socket.id];
-
-      if (user) {
-        socket.to(user.roomId).emit("user-left", socket.id);
-        delete users[socket.id];
-      }
+    socket.on("typing", ({ roomId }) => {
+      socket.to(roomId).emit("user-typing");
     });
 
     socket.on("disconnect", () => {
-      console.log("User disconnected:", socket.id);
+      const user = users[socket.id];
+      if (!user) return;
+
+      socket.to(user.roomId).emit("user-left", socket.id);
+      delete users[socket.id];
     });
   });
 };

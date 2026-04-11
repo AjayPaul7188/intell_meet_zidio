@@ -23,19 +23,20 @@ export default function Auth() {
 
   const setToken = useAuthStore((s) => s.setToken);
 
-  // LOGIN
+  // ================= LOGIN =================
   const loginMutation = useMutation({
     mutationFn: loginUser,
     onSuccess: (res) => {
-      const token = res.data.accessToken;
+      const { accessToken, user } = res.data;
 
-      localStorage.setItem("token", token);
+      // 🔥 IMPORTANT FIX (multi-tab issue solved)
+      sessionStorage.setItem("token", accessToken);
+      sessionStorage.setItem("authUser", JSON.stringify(user));
 
-      setToken(token);
-      connectSocket(token);
+      setToken(accessToken);
+      connectSocket(accessToken);
 
       setError("");
-
       navigate("/");
     },
     onError: (err: any) => {
@@ -43,12 +44,12 @@ export default function Auth() {
     },
   });
 
-  // SIGNUP
+  // ================= SIGNUP =================
   const signupMutation = useMutation({
     mutationFn: signupUser,
     onSuccess: () => {
       setError("");
-      alert("Signup successful Please login");
+      alert("Signup successful. Please login.");
       setIsLogin(true);
     },
     onError: (err: any) => {
@@ -56,7 +57,7 @@ export default function Auth() {
     },
   });
 
-  // Validation
+  // ================= VALIDATION =================
   const validate = () => {
     if (!form.email.includes("@")) return "Enter valid email";
     if (form.password.length < 6)
@@ -66,7 +67,7 @@ export default function Auth() {
     return "";
   };
 
-  // Submit
+  // ================= SUBMIT =================
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -84,7 +85,6 @@ export default function Auth() {
     } else {
       signupMutation.mutate({
         name: form.name,
-        username: form.name,
         email: form.email,
         password: form.password,
       });

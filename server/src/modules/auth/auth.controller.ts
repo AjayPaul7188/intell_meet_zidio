@@ -28,21 +28,24 @@ export const uploadAvatar = async (req: any, res: any) => {
       return res.status(400).json({ message: "No file uploaded" });
     }
 
-    const result = await cloudinary.uploader.upload_stream(
+    cloudinary.uploader.upload_stream(
       { folder: "avatars" },
       async (error, result) => {
         if (error) {
           return res.status(500).json({ message: "Upload failed" });
         }
 
+        console.log("Before:", req.user.avatar);
+
         req.user.avatar = result?.secure_url;
         await req.user.save();
 
+        console.log("After:", req.user.avatar); 
+
         res.json({ avatar: result?.secure_url });
       }
-    );
+    ).end(file.buffer);
 
-    result.end(file.buffer);
   } catch (error) {
     res.status(500).json({ message: "Error uploading avatar" });
   }
