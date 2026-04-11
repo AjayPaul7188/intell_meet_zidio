@@ -5,6 +5,7 @@ interface User {
   roomId: string;
   name: string;
   avatar: string;
+  muted: boolean;
 }
 
 export const handleSocket = (io: Server) => {
@@ -13,6 +14,7 @@ export const handleSocket = (io: Server) => {
   io.on("connection", (socket: Socket) => {
     console.log("User connected:", socket.id);
 
+    // JOIN ROOM
     socket.on("join-room", ({ roomId, name, avatar }) => {
       if (users[socket.id]) return;
 
@@ -23,6 +25,7 @@ export const handleSocket = (io: Server) => {
         roomId,
         name,
         avatar,
+        muted: false,
       };
 
       const existingUsers = Object.values(users).filter(
@@ -32,8 +35,15 @@ export const handleSocket = (io: Server) => {
       socket.emit("existing-users", existingUsers);
 
       socket.to(roomId).emit("user-joined", users[socket.id]);
+
+      // SEND PARTICIPANT LIST
+      io.to(roomId).emit(
+        "participant-list",
+        Object.values(users).filter((u) => u.roomId === roomId)
+      );
     });
 
+    // WEBRTC
     socket.on("offer", ({ to, offer }) => {
       io.to(to).emit("offer", { from: socket.id, offer });
     });
@@ -49,6 +59,7 @@ export const handleSocket = (io: Server) => {
       });
     });
 
+    // CHAT
     socket.on("send-message", ({ roomId, message }) => {
       const user = users[socket.id];
       if (!user) return;
@@ -64,12 +75,46 @@ export const handleSocket = (io: Server) => {
       socket.to(roomId).emit("user-typing");
     });
 
+    // MUTE SYNC
+    socket.on("toggle-mute", ({ muted }) => {
+      if (users[socket.id]) {
+        users[socket.id].muted = muted;
+
+        io.to(users[socket.id].roomId).emit(
+          "participant-updated",
+          users[socket.id]
+        );
+      }
+    });
+
+    // LEAVE ROOM
+    socket.on("leave-room", () => {
+      const user = users[socket.id];
+      if (!user) return;
+
+      socket.to(user.roomId).emit("user-left", socket.id);
+
+      delete users[socket.id];
+
+      io.to(user.roomId).emit(
+        "participant-list",
+        Object.values(users).filter((u) => u.roomId === user.roomId)
+      );
+    });
+
+    // DISCONNECT
     socket.on("disconnect", () => {
       const user = users[socket.id];
       if (!user) return;
 
       socket.to(user.roomId).emit("user-left", socket.id);
+
       delete users[socket.id];
+
+      io.to(user.roomId).emit(
+        "participant-list",
+        Object.values(users).filter((u) => u.roomId === user.roomId)
+      );
     });
   });
 };

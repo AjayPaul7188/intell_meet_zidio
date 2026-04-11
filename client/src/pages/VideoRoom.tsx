@@ -31,6 +31,8 @@ export default function VideoRoom() {
   const peers = useRef<Record<string, RTCPeerConnection>>({});
   const pendingCandidates = useRef<any>({});
 
+  const [participants, setParticipants] = useState<any[]>([]);
+
   const stopLocalIfNoPeers = () => {
     const hasPeers = Object.keys(peers.current).length > 0;
 
@@ -232,6 +234,16 @@ export default function VideoRoom() {
       });
     });
 
+    socket.on("participant-list", (list) => {
+      setParticipants(list);
+    });
+
+    socket.on("participant-updated", (user) => {
+      setParticipants((prev) =>
+        prev.map((p) => (p.id === user.id ? user : p))
+      );
+    });
+
     return () => {
       socket.off();
 
@@ -340,16 +352,22 @@ export default function VideoRoom() {
   const toggleMute = () => {
     const track = localStream.current?.getAudioTracks()[0];
     if (track) {
-      track.enabled = isMuted;
-      setIsMuted(!isMuted);
+      const newMuted = !isMuted;
+
+      track.enabled = !newMuted;
+      setIsMuted(newMuted);
+
+      socket.emit("toggle-mute", { muted: newMuted });
     }
   };
 
   const toggleCamera = () => {
     const track = localStream.current?.getVideoTracks()[0];
     if (track) {
-      track.enabled = isCameraOff;
-      setIsCameraOff(!isCameraOff);
+      const newState = !isCameraOff;
+
+      track.enabled = !newState;
+      setIsCameraOff(newState);
     }
   };
 
@@ -566,6 +584,26 @@ export default function VideoRoom() {
             <p className="absolute bottom-1 left-1 bg-black px-2 text-sm">
               {userMap[item.userId]?.name || "User"}
             </p>
+          </div>
+        ))}
+      </div>
+
+      {/* Participants */}
+      <div className="bg-slate-900 p-3">
+        <h2 className="text-lg mb-2">Participants</h2>
+
+        {participants.map((p) => (
+          <div key={p.id} className="flex items-center gap-2 mb-2">
+            <img src={p.avatar} className="w-8 h-8 rounded-full" />
+
+            <div className="flex-1">
+              <p>{p.name}</p>
+              <p className="text-xs text-gray-400">
+                {p.muted ? "🔇 Muted" : "🎤 Live"}
+              </p>
+            </div>
+
+            <div className="w-2 h-2 bg-green-500 rounded-full"></div>
           </div>
         ))}
       </div>
