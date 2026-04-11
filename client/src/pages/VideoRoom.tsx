@@ -13,6 +13,12 @@ export default function VideoRoom() {
     { stream: MediaStream; userId: string }[]
   >([]);
 
+  const [isScreenSharing, setIsScreenSharing] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordedChunks = useRef<Blob[]>([]);
+
   const [messages, setMessages] = useState<any[]>([]);
   const [message, setMessage] = useState("");
   const [typing, setTyping] = useState("");
@@ -22,8 +28,25 @@ export default function VideoRoom() {
 
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const localStream = useRef<MediaStream | null>(null);
-  const peers = useRef<any>({});
+  const peers = useRef<Record<string, RTCPeerConnection>>({});
   const pendingCandidates = useRef<any>({});
+
+  const stopLocalIfNoPeers = () => {
+    const hasPeers = Object.keys(peers.current).length > 0;
+
+    if (!hasPeers && localStream.current) {
+      localStream.current.getTracks().forEach((track) => {
+        track.stop();
+        track.enabled = false;
+      });
+
+      localStream.current = null;
+
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = null;
+      }
+    }
+  };
 
   useEffect(() => {
     const init = async () => {
@@ -49,7 +72,7 @@ export default function VideoRoom() {
 
     init();
 
-    // ================= EXISTING USERS =================
+    // EXISTING USERS
     const handleExistingUsers = (users: any[]) => {
       const map: any = {};
 
@@ -63,7 +86,7 @@ export default function VideoRoom() {
 
     socket.on("existing-users", handleExistingUsers);
 
-    // ================= NEW USER =================
+    // NEW USER
     const handleUserJoined = (u: any) => {
       setUserMap((prev: any) => ({
         ...prev,
@@ -75,7 +98,7 @@ export default function VideoRoom() {
 
     socket.on("user-joined", handleUserJoined);
 
-    // ================= OFFER =================
+    //OFFER
     socket.on("offer", async ({ from, offer }) => {
       let pc = peers.current[from];
 
@@ -100,7 +123,7 @@ export default function VideoRoom() {
       flushCandidates(from);
     });
 
-    // ================= ANSWER =================
+    // ANSWER
     socket.on("answer", async ({ from, answer }) => {
       const pc = peers.current[from];
       if (!pc) return;
@@ -116,7 +139,7 @@ export default function VideoRoom() {
       flushCandidates(from);
     });
 
-    // ================= ICE =================
+    // ICE 
     socket.on("ice-candidate", async ({ from, candidate }) => {
       const pc = peers.current[from];
       if (!pc) return;
@@ -135,7 +158,7 @@ export default function VideoRoom() {
       }
     });
 
-    // ================= CHAT =================
+    // CHAT
     const handleReceiveMessage = (data: any) => {
       setMessages((prev) => [
         ...prev,
@@ -150,7 +173,7 @@ export default function VideoRoom() {
 
     socket.on("receive-message", handleReceiveMessage);
 
-    // ================= TYPING =================
+    // TYPING
     const handleTyping = () => {
       setTyping("Someone is typing...");
       setTimeout(() => setTyping(""), 2000);
@@ -158,37 +181,84 @@ export default function VideoRoom() {
 
     socket.on("user-typing", handleTyping);
 
-    // ================= USER LEFT =================
+    // USER LEFT
     socket.on("user-left", (id) => {
-      peers.current[id]?.close();
-      delete peers.current[id];
+      const pc = peers.current[id];
 
-      setRemoteStreams((prev) =>
-        prev.filter((s) => s.userId !== id)
-      );
+      if (pc) {
+        // 1. STOP ALL SENDING TRACKS
+        pc.getSenders().forEach((sender) => {
+          if (sender.track) {
+            sender.track.stop();
+            sender.replaceTrack(null);
+          }
+        });
+
+        // 2. STOP RECEIVING TRACKS
+        pc.getReceivers().forEach((receiver) => {
+          if (receiver.track) {
+            receiver.track.stop();
+          }
+        });
+
+        // 3. CLOSE PEER CONNECTION
+        pc.ontrack = null;
+        pc.onicecandidate = null;
+        pc.onconnectionstatechange = null;
+        pc.close();
+
+        delete peers.current[id];
+      }
+
+      // 4. REMOVE STREAM FROM UI + STOP IT
+      setRemoteStreams((prev) => {
+        const leaving = prev.find((s) => s.userId === id);
+
+        if (leaving) {
+          leaving.stream.getTracks().forEach((track) => {
+            track.stop();
+            track.enabled = false;
+          });
+        }
+
+        const updated = prev.filter((s) => s.userId !== id);
+
+        // 5. CHECK IF WE CAN STOP LOCAL CAMERA SAFELY
+        setTimeout(() => {
+          stopLocalIfNoPeers();
+        }, 0);
+
+        return updated;
+      });
     });
 
     return () => {
-      socket.off("existing-users", handleExistingUsers);
-      socket.off("user-joined", handleUserJoined);
-      socket.off("receive-message", handleReceiveMessage);
-      socket.off("user-typing", handleTyping);
+      socket.off();
 
+      // STOP CAMERA + MIC
       if (localStream.current) {
-        localStream.current.getTracks().forEach((track) => track.stop());
+        localStream.current.getTracks().forEach((track) => {
+          track.stop();
+          track.enabled = false;
+        });
+        localStream.current = null;
       }
 
-      // close peers
-      Object.values(peers.current).forEach((pc: any) => pc.close());
+      // STOP SCREEN SHARE IF ANY
+      const screenStream = localVideoRef.current?.srcObject as MediaStream;
+      if (screenStream) {
+        screenStream.getTracks().forEach((t) => t.stop());
+      }
 
+      // CLOSE PEERS
+      Object.values(peers.current).forEach((pc) => pc.close());
       peers.current = {};
-
 
       socket.disconnect();
     };
   }, [roomId]);
 
-  // ================= CREATE PEER =================
+  // CREATE PEER
   const createPeer = (userId: string, initiator: boolean) => {
     if (peers.current[userId]) return peers.current[userId];
 
@@ -229,10 +299,28 @@ export default function VideoRoom() {
       });
     }
 
+    pc.onconnectionstatechange = () => {
+      if (
+        pc.connectionState === "disconnected" ||
+        pc.connectionState === "failed" ||
+        pc.connectionState === "closed"
+      ) {
+        pc.getSenders().forEach((sender) => {
+          if (sender.track) {
+            sender.track.stop();
+            sender.replaceTrack(null);
+          }
+        });
+
+        pc.close();
+        delete peers.current[userId];
+      }
+    };
+
     return pc;
   };
 
-  // ================= FLUSH ICE =================
+  // FLUSH ICE
   const flushCandidates = async (userId: string) => {
     const pc = peers.current[userId];
     const candidates = pendingCandidates.current[userId];
@@ -248,7 +336,7 @@ export default function VideoRoom() {
     pendingCandidates.current[userId] = [];
   };
 
-  // ================= CONTROLS =================
+  // CONTROLS
   const toggleMute = () => {
     const track = localStream.current?.getAudioTracks()[0];
     if (track) {
@@ -265,7 +353,7 @@ export default function VideoRoom() {
     }
   };
 
-  // ================= CHAT =================
+  // CHAT
   const sendMessage = () => {
     if (!message.trim()) return;
 
@@ -284,32 +372,172 @@ export default function VideoRoom() {
     setMessage("");
   };
 
-  const leaveMeeting = () => {
-    // Stop camera + mic
+  const leaveMeeting = async () => {
+    socket.emit("leave-room", roomId);
+
+    // 1. STOP ALL LOCAL STREAM TRACKS (camera + mic)
     if (localStream.current) {
       localStream.current.getTracks().forEach((track) => {
         track.stop();
+        track.enabled = false;
+      });
+      localStream.current = null;
+    }
+
+    // 2. STOP SCREEN SHARE TRACKS
+    const screenStream = localVideoRef.current?.srcObject as MediaStream;
+
+    if (screenStream) {
+      screenStream.getTracks().forEach((track) => {
+        track.stop();
+        track.enabled = false;
       });
     }
 
-    // Close all peer connections
-    (Object.values(peers.current) as RTCPeerConnection[]).forEach((pc) => {
+    // 3. CLEAR VIDEO ELEMENT PROPERLY
+    if (localVideoRef.current) {
+      localVideoRef.current.pause();
+      localVideoRef.current.srcObject = null;
+      localVideoRef.current.load();
+    }
+
+    // 4. CLOSE ALL PEERS + REMOVE TRACKS
+    Object.values(peers.current).forEach((pc) => {
+      pc.getSenders().forEach((sender) => {
+        if (sender.track) {
+          sender.track.stop();
+          sender.replaceTrack(null);
+        }
+      });
+
+      pc.ontrack = null;
+      pc.onicecandidate = null;
       pc.close();
     });
 
     peers.current = {};
 
-    // Clear remote streams
+    // 5. STOP MEDIA RECORDER
+    if (mediaRecorderRef.current) {
+      mediaRecorderRef.current.stop();
+      mediaRecorderRef.current = null;
+    }
+
+    // 6. RESET STATE
     setRemoteStreams([]);
+    setUserMap({});
+    setMessages([]);
+    setIsScreenSharing(false);
+    setIsRecording(false);
 
-    // Notify server
-    socket.emit("leave-room", roomId);
-
-    // Disconnect socket
+    // 7. DISCONNECT SOCKET LAST (IMPORTANT FIX)
+    socket.off(); // remove all listeners first
     socket.disconnect();
 
-    // Navigate away
+    // 8. NAVIGATE AWAY
     navigate("/");
+  };
+
+  const toggleScreenShare = async () => {
+    try {
+      if (!isScreenSharing) {
+        const screenStream = await navigator.mediaDevices.getDisplayMedia({
+          video: true,
+        });
+
+        const screenTrack = screenStream.getVideoTracks()[0];
+
+        // Replace video track in all peers
+        Object.values(peers.current).forEach((pc: RTCPeerConnection) => {
+          const sender = pc
+            .getSenders()
+            .find((s) => s.track?.kind === "video");
+
+          if (sender) sender.replaceTrack(screenTrack);
+        });
+
+        // Replace local video
+        if (localVideoRef.current) {
+          localVideoRef.current.srcObject = screenStream;
+        }
+
+        // When user stops screen share manually
+        screenTrack.onended = () => {
+          stopScreenShare();
+        };
+
+        setIsScreenSharing(true);
+      } else {
+        stopScreenShare();
+      }
+    } catch (err) {
+      console.error("Screen share error:", err);
+    }
+  };
+
+  const stopScreenShare = () => {
+    const videoTrack = localStream.current?.getVideoTracks()[0];
+
+    if (!videoTrack) return;
+
+    // stop screen stream
+    if (localVideoRef.current?.srcObject) {
+      const screenStream = localVideoRef.current.srcObject as MediaStream;
+      screenStream.getTracks().forEach((t) => t.stop());
+    }
+
+    // Replace back camera
+    Object.values(peers.current).forEach((pc: RTCPeerConnection) => {
+      const sender = pc
+        .getSenders()
+        .find((s) => s.track?.kind === "video");
+
+      if (sender) sender.replaceTrack(videoTrack);
+    });
+
+    // Restore local video
+    if (localVideoRef.current) {
+      localVideoRef.current.srcObject = localStream.current!;
+    }
+
+    setIsScreenSharing(false);
+  };
+
+  const toggleRecording = () => {
+    if (!isRecording) {
+      if (!localStream.current) return;
+
+      const recorder = new MediaRecorder(localStream.current);
+
+      recordedChunks.current = [];
+
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          recordedChunks.current.push(event.data);
+        }
+      };
+
+      recorder.onstop = () => {
+        const blob = new Blob(recordedChunks.current, {
+          type: "video/webm",
+        });
+
+        const url = URL.createObjectURL(blob);
+
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "recording.webm";
+        a.click();
+      };
+
+      recorder.start();
+      mediaRecorderRef.current = recorder;
+
+      setIsRecording(true);
+    } else {
+      mediaRecorderRef.current?.stop();
+      setIsRecording(false);
+    }
   };
 
   return (
@@ -328,7 +556,10 @@ export default function VideoRoom() {
             <video
               autoPlay
               ref={(video) => {
-                if (video) video.srcObject = item.stream;
+                if (!video) return;
+                if (video.srcObject !== item.stream) {
+                  video.srcObject = item.stream;
+                }
               }}
               className="rounded w-full"
             />
@@ -340,11 +571,23 @@ export default function VideoRoom() {
       </div>
 
       {/* CONTROLS */}
-      <div className="flex justify-center gap-4 p-4 bg-slate-900">
-        <button onClick={toggleMute}>{isMuted ? "Unmute" : "Mute"}</button>
+      <div className="flex justify-center gap-4 p-4 bg-slate-900 flex-wrap">
+        <button onClick={toggleMute}>
+          {isMuted ? "Unmute" : "Mute"}
+        </button>
+
         <button onClick={toggleCamera}>
           {isCameraOff ? "Camera On" : "Camera Off"}
         </button>
+
+        <button onClick={toggleScreenShare}>
+          {isScreenSharing ? "Stop Share" : "Share Screen"}
+        </button>
+
+        <button onClick={toggleRecording}>
+          {isRecording ? "Stop Recording" : "Record"}
+        </button>
+
         <button onClick={leaveMeeting} className="bg-red-500 px-3">
           Leave
         </button>
