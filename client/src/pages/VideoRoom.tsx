@@ -30,8 +30,15 @@ export default function VideoRoom() {
   const localStream = useRef<MediaStream | null>(null);
   const peers = useRef<Record<string, RTCPeerConnection>>({});
   const pendingCandidates = useRef<any>({});
+  const screenStreamRef = useRef<MediaStream | null>(null);
 
   const [participants, setParticipants] = useState<any[]>([]);
+
+  const [transcript, setTranscript] = useState("");
+  const recognitionRef = useRef<any>(null);
+
+  const [activeTab, setActiveTab] = useState<"participants" | "chat" | "transcript">("participants");
+  const [showMenu, setShowMenu] = useState(false);
 
   const stopLocalIfNoPeers = () => {
     const hasPeers = Object.keys(peers.current).length > 0;
@@ -270,6 +277,46 @@ export default function VideoRoom() {
     };
   }, [roomId]);
 
+  const startSpeechRecognition = () => {
+    const SpeechRecognition =
+      (window as any).SpeechRecognition ||
+      (window as any).webkitSpeechRecognition;
+
+    if (!SpeechRecognition) return;
+
+    const recognition = new SpeechRecognition();
+
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = "en-US";
+
+    recognition.onresult = (event: any) => {
+      let text = "";
+
+      for (let i = 0; i < event.results.length; i++) {
+        text += event.results[i][0].transcript;
+      }
+
+      setTranscript(text);
+    };
+
+    recognition.onend = () => {
+      if (recognitionRef.current) {
+        recognition.start();
+      }
+    };
+
+    recognition.start();
+    recognitionRef.current = recognition;
+  };
+
+  const stopSpeechRecognition = () => {
+    if (recognitionRef.current) {
+      recognitionRef.current.stop();
+      recognitionRef.current = null;
+    }
+  };
+
   // CREATE PEER
   const createPeer = (userId: string, initiator: boolean) => {
     if (peers.current[userId]) return peers.current[userId];
@@ -393,66 +440,76 @@ export default function VideoRoom() {
   const leaveMeeting = async () => {
     socket.emit("leave-room", roomId);
 
-    // 1. STOP ALL LOCAL STREAM TRACKS (camera + mic)
+    // DETACH TRACKS FROM PEERS FIRST
+    Object.values(peers.current).forEach((pc) => {
+      pc.getSenders().forEach((sender) => {
+        try {
+          sender.replaceTrack(null); 
+        } catch {}
+      });
+    });
+
+    // STOP SCREEN SHARE TRACKS
+    if (screenStreamRef.current) {
+      screenStreamRef.current.getTracks().forEach((track) => {
+        track.stop();
+      });
+      screenStreamRef.current = null;
+    }
+
+    // STOP LOCAL CAMERA + MIC
     if (localStream.current) {
       localStream.current.getTracks().forEach((track) => {
         track.stop();
-        track.enabled = false;
       });
       localStream.current = null;
     }
 
-    // 2. STOP SCREEN SHARE TRACKS
-    const screenStream = localVideoRef.current?.srcObject as MediaStream;
-
-    if (screenStream) {
-      screenStream.getTracks().forEach((track) => {
-        track.stop();
-        track.enabled = false;
-      });
-    }
-
-    // 3. CLEAR VIDEO ELEMENT PROPERLY
-    if (localVideoRef.current) {
-      localVideoRef.current.pause();
-      localVideoRef.current.srcObject = null;
-      localVideoRef.current.load();
-    }
-
-    // 4. CLOSE ALL PEERS + REMOVE TRACKS
+    // NOW CLOSE PEERS
     Object.values(peers.current).forEach((pc) => {
-      pc.getSenders().forEach((sender) => {
-        if (sender.track) {
-          sender.track.stop();
-          sender.replaceTrack(null);
-        }
-      });
-
       pc.ontrack = null;
       pc.onicecandidate = null;
-      pc.close();
+      pc.onconnectionstatechange = null;
+
+      try {
+        pc.close();
+      } catch {}
     });
 
     peers.current = {};
 
-    // 5. STOP MEDIA RECORDER
+    // CLEAR VIDEO ELEMENT HARD RESET
+    if (localVideoRef.current) {
+      localVideoRef.current.srcObject = null;
+      localVideoRef.current.removeAttribute("src");
+      localVideoRef.current.load();
+    }
+
+    // STEP 6: FORCE GC (important for Chrome)
+    setTimeout(() => {
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = null;
+      }
+    }, 0);
+
+    // STEP 7: STOP RECORDING
     if (mediaRecorderRef.current) {
       mediaRecorderRef.current.stop();
       mediaRecorderRef.current = null;
     }
 
-    // 6. RESET STATE
+    // STEP 8: RESET STATE
     setRemoteStreams([]);
     setUserMap({});
     setMessages([]);
     setIsScreenSharing(false);
     setIsRecording(false);
 
-    // 7. DISCONNECT SOCKET LAST (IMPORTANT FIX)
-    socket.off(); // remove all listeners first
+    // STEP 9: SOCKET CLEANUP
+    socket.off();
     socket.disconnect();
 
-    // 8. NAVIGATE AWAY
+    // STEP 10: NAVIGATE
     navigate("/");
   };
 
@@ -462,6 +519,8 @@ export default function VideoRoom() {
         const screenStream = await navigator.mediaDevices.getDisplayMedia({
           video: true,
         });
+
+        screenStreamRef.current = screenStream;
 
         const screenTrack = screenStream.getVideoTracks()[0];
 
@@ -494,28 +553,33 @@ export default function VideoRoom() {
   };
 
   const stopScreenShare = () => {
-    const videoTrack = localStream.current?.getVideoTracks()[0];
+    const cameraTrack = localStream.current?.getVideoTracks()[0];
 
-    if (!videoTrack) return;
-
-    // stop screen stream
-    if (localVideoRef.current?.srcObject) {
-      const screenStream = localVideoRef.current.srcObject as MediaStream;
-      screenStream.getTracks().forEach((t) => t.stop());
+    // 1. STOP SCREEN TRACK FIRST
+    if (screenStreamRef.current) {
+      screenStreamRef.current.getTracks().forEach((t) => {
+        t.stop();
+        t.enabled = false;
+      });
+      screenStreamRef.current = null;
     }
 
-    // Replace back camera
-    Object.values(peers.current).forEach((pc: RTCPeerConnection) => {
-      const sender = pc
-        .getSenders()
-        .find((s) => s.track?.kind === "video");
+    // 2. RESTORE CAMERA TRACK TO PEERS (CRITICAL)
+    if (cameraTrack) {
+      Object.values(peers.current).forEach((pc: RTCPeerConnection) => {
+        const sender = pc
+          .getSenders()
+          .find((s) => s.track?.kind === "video");
 
-      if (sender) sender.replaceTrack(videoTrack);
-    });
+        if (sender) {
+          sender.replaceTrack(cameraTrack);
+        }
+      });
+    }
 
-    // Restore local video
-    if (localVideoRef.current) {
-      localVideoRef.current.srcObject = localStream.current!;
+    // 3. RESTORE LOCAL VIDEO
+    if (localVideoRef.current && localStream.current) {
+      localVideoRef.current.srcObject = localStream.current;
     }
 
     setIsScreenSharing(false);
@@ -525,7 +589,13 @@ export default function VideoRoom() {
     if (!isRecording) {
       if (!localStream.current) return;
 
-      const recorder = new MediaRecorder(localStream.current);
+      // START SPEECH
+      startSpeechRecognition();
+
+      // START RECORDING
+      const recorder = new MediaRecorder(localStream.current, {
+        mimeType: "video/webm",
+      });
 
       recordedChunks.current = [];
 
@@ -541,7 +611,6 @@ export default function VideoRoom() {
         });
 
         const url = URL.createObjectURL(blob);
-
         const a = document.createElement("a");
         a.href = url;
         a.download = "recording.webm";
@@ -552,8 +621,15 @@ export default function VideoRoom() {
       mediaRecorderRef.current = recorder;
 
       setIsRecording(true);
+
     } else {
+      // STOP SPEECH
+      stopSpeechRecognition();
+
+      // STOP RECORDING
       mediaRecorderRef.current?.stop();
+      mediaRecorderRef.current = null;
+
       setIsRecording(false);
     }
   };
@@ -587,25 +663,135 @@ export default function VideoRoom() {
           </div>
         ))}
       </div>
+      
+      {/* LEFT PANEL */}
+      <div className="absolute top-4 right-4 w-80 bg-slate-900 rounded-lg shadow-lg flex flex-col">
 
-      {/* Participants */}
-      <div className="bg-slate-900 p-3">
-        <h2 className="text-lg mb-2">Participants</h2>
+        {/* HEADER */}
+        <div className="flex items-center justify-between p-2 border-b border-slate-700">
+          <button
+            onClick={() => setShowMenu(!showMenu)}
+            className="text-sm bg-slate-700 px-2 py-1 rounded"
+          >
+            ☰
+          </button>
 
-        {participants.map((p) => (
-          <div key={p.id} className="flex items-center gap-2 mb-2">
-            <img src={p.avatar} className="w-8 h-8 rounded-full" />
+          <h2 className="text-sm capitalize">{activeTab}</h2>
+        </div>
 
-            <div className="flex-1">
-              <p>{p.name}</p>
-              <p className="text-xs text-gray-400">
-                {p.muted ? "🔇 Muted" : "🎤 Live"}
-              </p>
-            </div>
+        {/* DROPDOWN MENU */}
+        {showMenu && (
+          <div className="absolute top-10 left-2 bg-slate-800 rounded shadow-md z-10">
+            <button
+              onClick={() => {
+                setActiveTab("participants");
+                setShowMenu(false);
+              }}
+              className="block px-3 py-2 hover:bg-slate-700 w-full text-left"
+            >
+              Participants
+            </button>
 
-            <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+            <button
+              onClick={() => {
+                setActiveTab("chat");
+                setShowMenu(false);
+              }}
+              className="block px-3 py-2 hover:bg-slate-700 w-full text-left"
+            >
+              Chat
+            </button>
+
+            <button
+              onClick={() => {
+                setActiveTab("transcript");
+                setShowMenu(false);
+              }}
+              className="block px-3 py-2 hover:bg-slate-700 w-full text-left"
+            >
+              Transcription
+            </button>
           </div>
-        ))}
+        )}
+
+        {/* CONTENT */}
+        <div className="p-2 h-64 overflow-y-auto">
+
+          {/* PARTICIPANTS */}
+          {activeTab === "participants" && (
+            <>
+              {participants.map((p) => (
+                <div key={p.id} className="flex items-center gap-2 mb-2">
+                  <img src={p.avatar} className="w-8 h-8 rounded-full" />
+
+                  <div className="flex-1">
+                    <p>{p.name}</p>
+                    <p className="text-xs text-gray-400">
+                      {p.muted ? "🔇 Muted" : "🎤 Live"}
+                    </p>
+                  </div>
+
+                  <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+                </div>
+              ))}
+            </>
+          )}
+
+          {/* CHAT */}
+          {activeTab === "chat" && (
+            <div className="flex flex-col h-full">
+
+              {/* MESSAGES (SCROLLABLE) */}
+              <div className="flex-1 overflow-y-auto space-y-2 mb-2">
+                {messages.map((msg, i) => (
+                  <div key={i} className={`flex gap-2 ${msg.self ? "justify-end" : ""}`}>
+                    {!msg.self && msg.avatar && (
+                      <img src={msg.avatar} className="w-6 h-6 rounded-full" />
+                    )}
+
+                    <div>
+                      <p className="text-xs text-gray-400">{msg.name}</p>
+                      <p className="bg-slate-700 px-3 py-1 rounded-lg">
+                        {msg.message}
+                      </p>
+                    </div>
+
+                    {msg.self && msg.avatar && (
+                      <img src={msg.avatar} className="w-6 h-6 rounded-full" />
+                    )}
+                  </div>
+                ))}
+                <p className="text-gray-400 text-sm">{typing}</p>
+              </div>
+
+              {/* INPUT (FIXED BOTTOM) */}
+              <div className="flex gap-2 border-t border-slate-700 pt-2">
+                <input
+                  className="flex-1 p-2 rounded text-black text-sm"
+                  value={message}
+                  onChange={(e) => {
+                    setMessage(e.target.value);
+                    socket.emit("typing", { roomId });
+                  }}
+                />
+                <button
+                  onClick={sendMessage}
+                  className="bg-blue-600 px-3 rounded text-sm"
+                >
+                  Send
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* TRANSCRIPTION */}
+          {activeTab === "transcript" && (
+            <div className="text-sm text-gray-300 whitespace-pre-wrap">
+              {transcript || "Start recording to generate transcription..."}
+            </div>
+          )}
+
+        </div>
       </div>
 
       {/* CONTROLS */}
@@ -629,45 +815,6 @@ export default function VideoRoom() {
         <button onClick={leaveMeeting} className="bg-red-500 px-3">
           Leave
         </button>
-      </div>
-
-      {/* CHAT */}
-      <div className="bg-slate-800 p-3">
-        <div className="h-32 overflow-y-auto mb-2 space-y-2">
-          {messages.map((msg, i) => (
-            <div key={i} className={`flex gap-2 ${msg.self ? "justify-end" : ""}`}>
-              {!msg.self && msg.avatar && (
-                <img src={msg.avatar} className="w-6 h-6 rounded-full" />
-              )}
-
-              <div>
-                <p className="text-xs text-gray-400">{msg.name}</p>
-                <p className="bg-slate-700 px-3 py-1 rounded-lg">
-                  {msg.message}
-                </p>
-              </div>
-
-              {msg.self && msg.avatar && (
-                <img src={msg.avatar} className="w-6 h-6 rounded-full" />
-              )}
-            </div>
-          ))}
-          <p className="text-gray-400 text-sm">{typing}</p>
-        </div>
-
-        <div className="flex gap-2">
-          <input
-            className="flex-1 p-2 rounded text-black"
-            value={message}
-            onChange={(e) => {
-              setMessage(e.target.value);
-              socket.emit("typing", { roomId });
-            }}
-          />
-          <button onClick={sendMessage} className="bg-blue-600 px-4 rounded">
-            Send
-          </button>
-        </div>
       </div>
     </div>
   );

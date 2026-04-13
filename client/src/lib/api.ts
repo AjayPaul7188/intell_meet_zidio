@@ -6,7 +6,7 @@ export const api = axios.create({
 
 // Attach token automatically
 api.interceptors.request.use((config) => {
-  const token = sessionStorage.getItem("token"); // ✅ FIX
+  const token = sessionStorage.getItem("token"); 
 
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
